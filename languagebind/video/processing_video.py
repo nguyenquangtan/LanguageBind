@@ -1,7 +1,8 @@
+
+import torch
 import cv2
 import decord
 import numpy as np
-import torch
 from PIL import Image
 from decord import VideoReader, cpu
 from torchvision import transforms
@@ -145,6 +146,9 @@ class LanguageBindVideoProcessor(ProcessorMixin):
             return encoding
         else:
             return {"pixel_values": image_features}
+
+    def preprocess(self, images, return_tensors):
+        return self.__call__(images=images, return_tensors=return_tensors)
 
     def batch_decode(self, skip_special_tokens=True, *args, **kwargs):
         """

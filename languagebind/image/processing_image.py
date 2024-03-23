@@ -26,7 +26,7 @@ def get_image_transform(config):
 
 
 def load_and_transform_image(image_path, transform):
-    image = Image.open(image_path)
+    image = Image.open(image_path).convert('RGB') if isinstance(image_path, str) else image_path
     image_outputs = transform(image)
     return image_outputs
 
@@ -40,6 +40,8 @@ class LanguageBindImageProcessor(ProcessorMixin):
         self.transform = get_image_transform(config)
         self.image_processor = load_and_transform_image
         self.tokenizer = tokenizer
+        self.image_mean = OPENAI_DATASET_MEAN
+        self.crop_size = {'height': 224, 'width': 224}
 
     def __call__(self, images=None, text=None, context_length=77, return_tensors=None, **kwargs):
         if text is None and images is None:
@@ -61,6 +63,9 @@ class LanguageBindImageProcessor(ProcessorMixin):
             return encoding
         else:
             return {"pixel_values": image_features}
+
+    def preprocess(self, images, return_tensors):
+        return self.__call__(images=images, return_tensors=return_tensors)
 
     def batch_decode(self, skip_special_tokens=True, *args, **kwargs):
         """
