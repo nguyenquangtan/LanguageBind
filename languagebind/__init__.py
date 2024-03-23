@@ -28,7 +28,6 @@ from .thermal.tokenization_thermal import LanguageBindThermalTokenizer
 from .thermal.processing_thermal import LanguageBindThermalProcessor
 
 
-
 config_dict = {
     'thermal': LanguageBindThermalConfig,
     'image': LanguageBindImageConfig,
@@ -51,6 +50,7 @@ transform_dict = {
     'image': LanguageBindImageProcessor,
 }
 
+
 class LanguageBind(nn.Module):
     def __init__(self, clip_type, use_temp=True, cache_dir='./cache_dir'):
         super(LanguageBind, self).__init__()
@@ -61,7 +61,8 @@ class LanguageBind(nn.Module):
         self.modality_config = {}
         for k, v in clip_type.items():
             pretrained_ckpt = f'LanguageBind/{v}'
-            model = model_dict[k].from_pretrained(pretrained_ckpt, cache_dir=cache_dir)
+            model = model_dict[k].from_pretrained(
+                pretrained_ckpt, cache_dir=cache_dir)
             self.modality_encoder[k] = model.vision_model
             self.modality_proj[k] = model.visual_projection
             self.modality_scale[k] = model.logit_scale
@@ -84,7 +85,97 @@ class LanguageBind(nn.Module):
             outputs[key] = value
         return outputs
 
+
 def to_device(x, device):
     out_dict = {k: v.to(device) for k, v in x.items()}
     return out_dict
 
+
+class LanguageBindVideoTower(nn.Module):
+    def __init__(self, video_tower, args, delay_load=False, cache_dir='./cache_dir'):
+        super().__init__()
+
+        self.is_loaded = False
+
+        self.video_tower_name = video_tower
+        self.select_layer = args.mm_vision_select_layer
+        self.select_feature = getattr(
+            args, 'mm_vision_select_feature', 'patch')
+
+        self.cache_dir = cache_dir
+
+        if not delay_load:
+            self.load_model()
+        else:
+            self.cfg_only = LanguageBindVideoConfig.from_pretrained(
+                self.video_tower_name, cache_dir=self.cache_dir)
+
+    ############################################################
+    def load_model(self):
+        model = LanguageBindVideo.from_pretrained(
+            self.video_tower_name, cache_dir=self.cache_dir)
+        self.video_processor = LanguageBindVideoProcessor(model.config)
+
+        # model = LanguageBindImage.from_pretrained('LanguageBind/LanguageBind_Image', cache_dir=self.cache_dir)
+        self.video_tower = model.vision_model
+        self.video_tower.requires_grad_(False)
+
+        self.is_loaded = True
+
+    def feature_select(self, video_forward_outs):
+        # b t n c
+        video_features = video_forward_outs.hidden_states[self.select_layer]
+        return video_features  # return all
+        # b, t, n, c = video_features.shape
+        # if self.select_feature == 'patch':
+        #     video_features = video_features[:, :, 1:]
+        # else:
+        #     raise ValueError(f'Unexpected select feature: {self.select_feature}')
+        # return video_features
+
+    @torch.no_grad()
+    def forward(self, videos):
+        if type(videos) is list:
+            video_features = []
+            for video in videos:
+                video_forward_out = self.video_tower(video.to(
+                    device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
+                video_feature = self.feature_select(
+                    video_forward_out).to(video.dtype)
+                video_features.append(video_feature)
+        else:
+            video_forward_outs = self.video_tower(
+                videos.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
+            video_features = self.feature_select(
+                video_forward_outs).to(videos.dtype)
+
+        return video_features
+
+    @property
+    def dummy_feature(self):
+        return torch.zeros(1, self.hidden_size, device=self.device, dtype=self.dtype)
+
+    @property
+    def dtype(self):
+        return self.video_tower.embeddings.class_embedding.dtype
+        # return torch.randn(1).cuda().dtype
+
+    @property
+    def device(self):
+        return self.video_tower.embeddings.class_embedding.device
+        # return torch.randn(1).cuda().device
+
+    @property
+    def config(self):
+        if self.is_loaded:
+            return self.video_tower.config
+        else:
+            return self.cfg_only
+
+    @property
+    def hidden_size(self):
+        return self.config.hidden_size
+
+    @property
+    def num_patches(self):
+        return (self.config.image_size // self.config.patch_size) ** 2
