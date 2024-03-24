@@ -9,10 +9,12 @@ from torch.nn import functional as F
 from transformers import PreTrainedModel, add_start_docstrings
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.models.clip.modeling_clip import CLIPMLP, CLIPAttention, CLIPTextEmbeddings, CLIPVisionEmbeddings, \
-    CLIPVisionModelWithProjection, CLIPTextModelWithProjection, _expand_mask, CLIPOutput, clip_loss
+    CLIPVisionModelWithProjection, CLIPTextModelWithProjection, CLIPOutput, clip_loss
 from transformers.utils import add_start_docstrings_to_model_forward, replace_return_docstrings
 
 from .configuration_depth import LanguageBindDepthConfig, CLIPVisionConfig, CLIPTextConfig
+
+from transformers.modeling_attn_mask_utils import _create_4d_causal_attention_mask, _prepare_4d_attention_mask
 
 
 
@@ -495,12 +497,13 @@ class CLIPTextTransformer(nn.Module):
 
         # CLIP's text model uses causal mask, prepare it here.
         # https://github.com/openai/CLIP/blob/cfcffb90e69f37bf2ff1e988237a0fbe41f33c04/clip/model.py#L324
-        causal_attention_mask = _make_causal_mask(input_shape, hidden_states.dtype, device=hidden_states.device)
+        causal_attention_mask = _create_4d_causal_attention_mask(
+            input_shape, hidden_states.dtype, device=hidden_states.device
+        )
         # expand attention_mask
         if attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            attention_mask = _expand_mask(attention_mask, hidden_states.dtype)
-
+            attention_mask = _prepare_4d_attention_mask(attention_mask, hidden_states.dtype)
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
             attention_mask=attention_mask,

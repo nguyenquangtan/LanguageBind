@@ -9,11 +9,12 @@ from torch.nn import functional as F
 from transformers import PreTrainedModel, add_start_docstrings
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.models.clip.modeling_clip import CLIPMLP, CLIPAttention, CLIPTextEmbeddings, CLIPVisionEmbeddings, \
-    CLIPVisionModelWithProjection, CLIPTextModelWithProjection, _expand_mask, CLIPOutput, clip_loss
+    CLIPVisionModelWithProjection, CLIPTextModelWithProjection, CLIPOutput, clip_loss
 from transformers.utils import add_start_docstrings_to_model_forward, replace_return_docstrings
 
 from .configuration_audio import LanguageBindAudioConfig, CLIPVisionConfig, CLIPTextConfig
 
+from transformers.modeling_attn_mask_utils import _create_4d_causal_attention_mask, _prepare_4d_attention_mask
 
 
 class PatchDropout(nn.Module):
@@ -51,9 +52,10 @@ class PatchDropout(nn.Module):
         else:
             rand = torch.randn(B, num_tokens)
             patch_indices_keep = rand.topk(num_patches_keep, dim=-1).indices
-            patch_indices_keep = patch_indices_keep.unsqueeze(1).repeat(1, T, 1)
-            patch_indices_keep = rearrange(patch_indices_keep, 'b t n -> (b t) n')
-
+            patch_indices_keep = patch_indices_keep.unsqueeze(
+                1).repeat(1, T, 1)
+            patch_indices_keep = rearrange(
+                patch_indices_keep, 'b t n -> (b t) n')
 
         x = x[batch_indices, patch_indices_keep]
 
@@ -62,26 +64,33 @@ class PatchDropout(nn.Module):
 
         return x
 
+
 class CLIPEncoderLayer(nn.Module):
     def __init__(self, config: LanguageBindAudioConfig):
         super().__init__()
         self.embed_dim = config.hidden_size
         self.self_attn = CLIPAttention(config)
-        self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm1 = nn.LayerNorm(
+            self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = CLIPMLP(config)
-        self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm2 = nn.LayerNorm(
+            self.embed_dim, eps=config.layer_norm_eps)
 
         self.add_time_attn = config.add_time_attn
         if self.add_time_attn:
             self.t = config.num_frames
-            self.temporal_embedding = nn.Parameter(torch.zeros(1, config.num_frames, config.hidden_size))
-            nn.init.normal_(self.temporal_embedding, std=config.hidden_size ** -0.5)
+            self.temporal_embedding = nn.Parameter(
+                torch.zeros(1, config.num_frames, config.hidden_size))
+            nn.init.normal_(self.temporal_embedding,
+                            std=config.hidden_size ** -0.5)
 
             self.embed_dim = config.hidden_size
             self.temporal_attn = CLIPAttention(config)
-            self.temporal_layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+            self.temporal_layer_norm1 = nn.LayerNorm(
+                self.embed_dim, eps=config.layer_norm_eps)
             self.temporal_mlp = CLIPMLP(config)
-            self.temporal_layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+            self.temporal_layer_norm2 = nn.LayerNorm(
+                self.embed_dim, eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -101,7 +110,6 @@ class CLIPEncoderLayer(nn.Module):
                 returned tensors for more detail.
         """
 
-
         if self.add_time_attn:
             bt, n, d = hidden_states.shape
             t = self.t
@@ -109,13 +117,17 @@ class CLIPEncoderLayer(nn.Module):
             # time embed
             if t != 1:
                 n = hidden_states.shape[1]
-                hidden_states = rearrange(hidden_states, '(b t) n d -> (b n) t d', t=t)
-                hidden_states = hidden_states + self.temporal_embedding[:, :t, :]
-                hidden_states = rearrange(hidden_states, '(b n) t d -> (b t) n d', n=n)
+                hidden_states = rearrange(
+                    hidden_states, '(b t) n d -> (b n) t d', t=t)
+                hidden_states = hidden_states + \
+                    self.temporal_embedding[:, :t, :]
+                hidden_states = rearrange(
+                    hidden_states, '(b n) t d -> (b t) n d', n=n)
 
             # time attn
             residual = hidden_states
-            hidden_states = rearrange(hidden_states, '(b t) n d -> (b n) t d', t=t)
+            hidden_states = rearrange(
+                hidden_states, '(b t) n d -> (b n) t d', t=t)
             # hidden_states = self.layer_norm1(hidden_states)  # share layernorm
             hidden_states = self.temporal_layer_norm1(hidden_states)
             hidden_states, attn_weights = self.temporal_attn(
@@ -124,14 +136,17 @@ class CLIPEncoderLayer(nn.Module):
                 causal_attention_mask=causal_attention_mask,
                 output_attentions=output_attentions,
             )
-            hidden_states = residual + rearrange(hidden_states, '(b n) t d -> (b t) n d', n=n)
+            hidden_states = residual + \
+                rearrange(hidden_states, '(b n) t d -> (b t) n d', n=n)
 
             residual = hidden_states
-            hidden_states = rearrange(hidden_states, '(b t) n d -> (b n) t d', t=t)
+            hidden_states = rearrange(
+                hidden_states, '(b t) n d -> (b n) t d', t=t)
             # hidden_states = self.layer_norm2(hidden_states)  # share layernorm
             hidden_states = self.temporal_layer_norm2(hidden_states)
             hidden_states = self.temporal_mlp(hidden_states)
-            hidden_states = residual + rearrange(hidden_states, '(b n) t d -> (b t) n d', n=n)
+            hidden_states = residual + \
+                rearrange(hidden_states, '(b n) t d -> (b t) n d', n=n)
 
         # spatial attn
         residual = hidden_states
@@ -158,13 +173,6 @@ class CLIPEncoderLayer(nn.Module):
         return outputs
 
 
-
-
-
-
-
-
-
 class CLIPPreTrainedModel(PreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
@@ -180,16 +188,22 @@ class CLIPPreTrainedModel(PreTrainedModel):
         """Initialize the weights"""
         factor = self.config.initializer_factor
         if isinstance(module, CLIPTextEmbeddings):
-            module.token_embedding.weight.data.normal_(mean=0.0, std=factor * 0.02)
-            module.position_embedding.weight.data.normal_(mean=0.0, std=factor * 0.02)
+            module.token_embedding.weight.data.normal_(
+                mean=0.0, std=factor * 0.02)
+            module.position_embedding.weight.data.normal_(
+                mean=0.0, std=factor * 0.02)
         elif isinstance(module, CLIPVisionEmbeddings):
             factor = self.config.initializer_factor
-            nn.init.normal_(module.class_embedding, mean=0.0, std=module.embed_dim**-0.5 * factor)
-            nn.init.normal_(module.patch_embedding.weight, std=module.config.initializer_range * factor)
-            nn.init.normal_(module.position_embedding.weight, std=module.config.initializer_range * factor)
+            nn.init.normal_(module.class_embedding, mean=0.0,
+                            std=module.embed_dim**-0.5 * factor)
+            nn.init.normal_(module.patch_embedding.weight,
+                            std=module.config.initializer_range * factor)
+            nn.init.normal_(module.position_embedding.weight,
+                            std=module.config.initializer_range * factor)
         elif isinstance(module, CLIPAttention):
             factor = self.config.initializer_factor
-            in_proj_std = (module.embed_dim**-0.5) * ((2 * module.config.num_hidden_layers) ** -0.5) * factor
+            in_proj_std = (module.embed_dim**-0.5) * \
+                ((2 * module.config.num_hidden_layers) ** -0.5) * factor
             out_proj_std = (module.embed_dim**-0.5) * factor
             nn.init.normal_(module.q_proj.weight, std=in_proj_std)
             nn.init.normal_(module.k_proj.weight, std=in_proj_std)
@@ -198,7 +212,8 @@ class CLIPPreTrainedModel(PreTrainedModel):
         elif isinstance(module, CLIPMLP):
             factor = self.config.initializer_factor
             in_proj_std = (
-                (module.config.hidden_size**-0.5) * ((2 * module.config.num_hidden_layers) ** -0.5) * factor
+                (module.config.hidden_size**-0.5) *
+                ((2 * module.config.num_hidden_layers) ** -0.5) * factor
             )
             fc_std = (2 * module.config.hidden_size) ** -0.5 * factor
             nn.init.normal_(module.fc1.weight, std=fc_std)
@@ -346,7 +361,8 @@ class CLIPEncoder(nn.Module):
     def __init__(self, config: LanguageBindAudioConfig):
         super().__init__()
         self.config = config
-        self.layers = nn.ModuleList([CLIPEncoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList(
+            [CLIPEncoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
     def forward(
@@ -445,13 +461,15 @@ def _make_causal_mask(
     Make causal mask used for bi-directional self-attention.
     """
     bsz, tgt_len = input_ids_shape
-    mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
+    mask = torch.full((tgt_len, tgt_len),
+                      torch.finfo(dtype).min, device=device)
     mask_cond = torch.arange(mask.size(-1), device=device)
     mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
     mask = mask.to(dtype)
 
     if past_key_values_length > 0:
-        mask = torch.cat([torch.zeros(tgt_len, past_key_values_length, dtype=dtype, device=device), mask], dim=-1)
+        mask = torch.cat([torch.zeros(
+            tgt_len, past_key_values_length, dtype=dtype, device=device), mask], dim=-1)
     return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
 
 
@@ -462,7 +480,8 @@ class CLIPTextTransformer(nn.Module):
         embed_dim = config.hidden_size
         self.embeddings = CLIPTextEmbeddings(config)
         self.encoder = CLIPEncoder(config)
-        self.final_layer_norm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        self.final_layer_norm = nn.LayerNorm(
+            embed_dim, eps=config.layer_norm_eps)
 
     @add_start_docstrings_to_model_forward(CLIP_TEXT_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=BaseModelOutputWithPooling, config_class=CLIPTextConfig)
@@ -491,15 +510,19 @@ class CLIPTextTransformer(nn.Module):
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
 
-        hidden_states = self.embeddings(input_ids=input_ids, position_ids=position_ids)
+        hidden_states = self.embeddings(
+            input_ids=input_ids, position_ids=position_ids)
 
         # CLIP's text model uses causal mask, prepare it here.
         # https://github.com/openai/CLIP/blob/cfcffb90e69f37bf2ff1e988237a0fbe41f33c04/clip/model.py#L324
-        causal_attention_mask = _make_causal_mask(input_shape, hidden_states.dtype, device=hidden_states.device)
+        causal_attention_mask = _create_4d_causal_attention_mask(
+            input_shape, hidden_states.dtype, device=hidden_states.device
+        )
         # expand attention_mask
         if attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            attention_mask = _expand_mask(attention_mask, hidden_states.dtype)
+            attention_mask = _prepare_4d_attention_mask(
+                attention_mask, hidden_states.dtype)
 
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
@@ -517,8 +540,10 @@ class CLIPTextTransformer(nn.Module):
         # take features from the eot embedding (eot_token is the highest number in each sequence)
         # casting to torch.int for onnx compatibility: argmax doesn't support int64 inputs with opset 14
         pooled_output = last_hidden_state[
-            torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device),
-            input_ids.to(dtype=torch.int, device=last_hidden_state.device).argmax(dim=-1),
+            torch.arange(
+                last_hidden_state.shape[0], device=last_hidden_state.device),
+            input_ids.to(dtype=torch.int,
+                         device=last_hidden_state.device).argmax(dim=-1),
         ]
 
         if not return_dict:
@@ -603,7 +628,8 @@ class CLIPVisionTransformer(nn.Module):
         self.patch_dropout = PatchDropout(config.force_patch_dropout)
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         self.encoder = CLIPEncoder(config)
-        self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        self.post_layernorm = nn.LayerNorm(
+            embed_dim, eps=config.layer_norm_eps)
 
     @add_start_docstrings_to_model_forward(CLIP_VISION_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=BaseModelOutputWithPooling, config_class=CLIPVisionConfig)
@@ -644,7 +670,7 @@ class CLIPVisionTransformer(nn.Module):
         ###########################
         hidden_states = self.embeddings(pixel_values)
 
-        hidden_states = self.patch_dropout(hidden_states, B, T)  ##############################################
+        hidden_states = self.patch_dropout(hidden_states, B, T)
 
         hidden_states = self.pre_layrnorm(hidden_states)
 
@@ -659,7 +685,7 @@ class CLIPVisionTransformer(nn.Module):
         pooled_output = last_hidden_state[:, 0, :]
         pooled_output = self.post_layernorm(pooled_output)
 
-        pooled_output = pooled_output.reshape(B, T, -1).mean(1) ################################
+        pooled_output = pooled_output.reshape(B, T, -1).mean(1)
 
         if not return_dict:
             return (last_hidden_state, pooled_output) + encoder_outputs[1:]
@@ -763,9 +789,12 @@ class LanguageBindAudio(CLIPPreTrainedModel):
         self.text_model = CLIPTextTransformer(text_config)
         self.vision_model = CLIPVisionTransformer(vision_config)
 
-        self.visual_projection = nn.Linear(self.vision_embed_dim, self.projection_dim, bias=False)
-        self.text_projection = nn.Linear(self.text_embed_dim, self.projection_dim, bias=False)
-        self.logit_scale = nn.Parameter(torch.tensor(self.config.logit_scale_init_value))
+        self.visual_projection = nn.Linear(
+            self.vision_embed_dim, self.projection_dim, bias=False)
+        self.text_projection = nn.Linear(
+            self.text_embed_dim, self.projection_dim, bias=False)
+        self.logit_scale = nn.Parameter(
+            torch.tensor(self.config.logit_scale_init_value))
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -790,19 +819,24 @@ class LanguageBindAudio(CLIPPreTrainedModel):
             modules_to_save=[],
         )
         self.vision_model.encoder.is_gradient_checkpointing = False
-        self.vision_model.encoder = get_peft_model(self.vision_model.encoder, config)
+        self.vision_model.encoder = get_peft_model(
+            self.vision_model.encoder, config)
 
     def resize_pos(self, m, vision_config):
         # convert embedding
-        if vision_config.num_mel_bins!=0 and vision_config.target_length!=0:
-            m.image_size = [vision_config.num_mel_bins, vision_config.target_length]
-        m.config.image_size = [m.image_size, m.image_size] if isinstance(m.image_size, int) else m.image_size
+        if vision_config.num_mel_bins != 0 and vision_config.target_length != 0:
+            m.image_size = [vision_config.num_mel_bins,
+                            vision_config.target_length]
+        m.config.image_size = [m.image_size, m.image_size] if isinstance(
+            m.image_size, int) else m.image_size
         # pos resize
         old_pos_embed_state_dict = m.position_embedding.state_dict()
         old_pos_embed = old_pos_embed_state_dict['weight']
         dtype = old_pos_embed.dtype
-        grid_size = [m.config.image_size[0] // m.patch_size, m.config.image_size[1] // m.patch_size]
-        extra_tokens = 1  # FIXME detect different token configs (ie no class token, or more)
+        grid_size = [m.config.image_size[0] // m.patch_size,
+                     m.config.image_size[1] // m.patch_size]
+        # FIXME detect different token configs (ie no class token, or more)
+        extra_tokens = 1
         new_seq_len = grid_size[0] * grid_size[1] + extra_tokens
         if new_seq_len == old_pos_embed.shape[0]:
             # m.to(args.device)
@@ -810,18 +844,21 @@ class LanguageBindAudio(CLIPPreTrainedModel):
 
         m.num_patches = grid_size[0] * grid_size[1]
         m.num_positions = m.num_patches + 1
-        m.register_buffer("position_ids", torch.arange(m.num_positions).expand((1, -1)))
+        m.register_buffer("position_ids", torch.arange(
+            m.num_positions).expand((1, -1)))
         new_position_embedding = nn.Embedding(m.num_positions, m.embed_dim)
 
         if extra_tokens:
-            pos_emb_tok, pos_emb_img = old_pos_embed[:extra_tokens], old_pos_embed[extra_tokens:]
+            pos_emb_tok, pos_emb_img = old_pos_embed[:
+                                                     extra_tokens], old_pos_embed[extra_tokens:]
         else:
             pos_emb_tok, pos_emb_img = None, old_pos_embed
         old_grid_size = [int(math.sqrt(len(pos_emb_img)))] * 2
 
         # if is_master(args):
         #     logging.info('Resizing position embedding grid-size from %s to %s', old_grid_size, grid_size)
-        pos_emb_img = pos_emb_img.reshape(1, old_grid_size[0], old_grid_size[1], -1).permute(0, 3, 1, 2)
+        pos_emb_img = pos_emb_img.reshape(
+            1, old_grid_size[0], old_grid_size[1], -1).permute(0, 3, 1, 2)
         pos_emb_img = F.interpolate(
             pos_emb_img,
             size=grid_size,
@@ -829,7 +866,8 @@ class LanguageBindAudio(CLIPPreTrainedModel):
             antialias=True,
             align_corners=False,
         )
-        pos_emb_img = pos_emb_img.permute(0, 2, 3, 1).reshape(1, grid_size[0] * grid_size[1], -1)[0]
+        pos_emb_img = pos_emb_img.permute(0, 2, 3, 1).reshape(
+            1, grid_size[0] * grid_size[1], -1)[0]
         if pos_emb_tok is not None:
             new_pos_embed = torch.cat([pos_emb_tok, pos_emb_img], dim=0)
         else:
@@ -1003,12 +1041,14 @@ class LanguageBindAudio(CLIPPreTrainedModel):
         text_embeds = self.text_projection(text_embeds)
 
         # normalized features
-        image_embeds = image_embeds / image_embeds.norm(p=2, dim=-1, keepdim=True)
+        image_embeds = image_embeds / \
+            image_embeds.norm(p=2, dim=-1, keepdim=True)
         text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
 
         # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
-        logits_per_text = torch.matmul(text_embeds, image_embeds.t()) * logit_scale
+        logits_per_text = torch.matmul(
+            text_embeds, image_embeds.t()) * logit_scale
         logits_per_image = logits_per_text.t()
 
         loss = None
@@ -1016,7 +1056,8 @@ class LanguageBindAudio(CLIPPreTrainedModel):
             loss = clip_loss(logits_per_text)
 
         if not return_dict:
-            output = (logits_per_image, logits_per_text, text_embeds, image_embeds, text_outputs, vision_outputs)
+            output = (logits_per_image, logits_per_text, text_embeds,
+                      image_embeds, text_outputs, vision_outputs)
             return ((loss,) + output) if loss is not None else output
 
         return CLIPOutput(
